@@ -1,137 +1,144 @@
 import os
 import time
 import json
+import tempfile
 import requests
 from datetime import datetime
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
-from logging.handlers import RotatingFileHandler
-import logging
+from threading import Lock
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-LOG_DIR = "logs"
-LOG_FILE = f"{LOG_DIR}/telegram_audit.log"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # optional
 
-API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI()
 
-# =============================
-# Create log directory
-# =============================
-os.makedirs(LOG_DIR, exist_ok=True)
+# Store last 10 messages per chat_id in memory
+# { chat_id: [ {log_line}, {log_line}, ... ] }
+BUFFER: dict[int, list[dict]] = {}
+LOCK = Lock()
 
-# =============================
-# Configure logger
-# =============================
-logger = logging.getLogger("telegram_bot")
-logger.setLevel(logging.INFO)
+def now_utc():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-handler = RotatingFileHandler(
-    LOG_FILE,
-    maxBytes=5 * 1024 * 1024,  # 5MB
-    backupCount=3              # keep 3 old files
-)
-
-formatter = logging.Formatter('%(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-# Also print to Railway logs
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
-
-def log_json(data: dict):
-    data["ts"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    logger.info(json.dumps(data, ensure_ascii=False))
-
-
-# =============================
-# Telegram Sender
-# =============================
 def tg_send_message(chat_id: int, text: str):
-    start = time.time()
-
     try:
-        r = requests.post(
-            f"{API}/sendMessage",
+        requests.post(
+            f"{API_BASE}/sendMessage",
             data={"chat_id": chat_id, "text": text},
             timeout=10
         )
+    except Exception:
+        pass
 
-        ms = int((time.time() - start) * 1000)
-        resp = r.json()
+def tg_send_document(chat_id: int, filepath: str, caption: str = ""):
+    """
+    Send a file to Telegram DM using sendDocument (multipart/form-data).
+    """
+    try:
+        with open(filepath, "rb") as f:
+            files = {"document": (os.path.basename(filepath), f)}
+            data = {"chat_id": chat_id, "caption": caption}
+            requests.post(
+                f"{API_BASE}/sendDocument",
+                data=data,
+                files=files,
+                timeout=20
+            )
+    except Exception:
+        pass
 
-        log_json({
-            "type": "outgoing",
-            "chat_id": chat_id,
-            "telegram_api_ms": ms,
-            "telegram_ok": resp.get("ok"),
-            "telegram_resp": resp
-        })
+def build_and_send_log_if_ready(chat_id: int, username: str | None):
+    """
+    If buffer has 10 items, write to .log and send to user, then clear buffer.
+    Runs in background task.
+    """
+    with LOCK:
+        items = BUFFER.get(chat_id, [])
+        if len(items) < 10:
+            return
+        # take exactly 10 and reset
+        batch = items[:10]
+        BUFFER[chat_id] = items[10:]  # keep extra if any
 
-    except Exception as e:
-        ms = int((time.time() - start) * 1000)
-        log_json({
-            "type": "telegram_error",
-            "telegram_api_ms": ms,
-            "error": str(e)
-        })
+    # Write to a temp .log file
+    safe_user = username or f"chat_{chat_id}"
+    filename = f"audit_{safe_user}_{int(time.time())}.log"
 
+    tmpdir = tempfile.gettempdir()
+    filepath = os.path.join(tmpdir, filename)
 
-# =============================
-# Health Check
-# =============================
+    # Write JSON lines for easy parsing later
+    with open(filepath, "w", encoding="utf-8") as f:
+        for row in batch:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    # Send file to user
+    caption = "✅ Your last 10 messages audit log"
+    tg_send_document(chat_id, filepath, caption=caption)
+
+    # Cleanup temp file
+    try:
+        os.remove(filepath)
+    except Exception:
+        pass
+
 @app.get("/health")
 def health():
     return {"ok": True}
 
-
-# =============================
-# Webhook
-# =============================
 @app.post("/webhook")
 async def webhook(request: Request, background: BackgroundTasks):
-
-    start_time = time.time()
-
+    # Optional secret verification
     if WEBHOOK_SECRET:
         incoming_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if incoming_secret != WEBHOOK_SECRET:
-            log_json({"type": "blocked", "reason": "invalid_secret"})
             return PlainTextResponse("Forbidden", status_code=403)
 
     data = await request.json()
 
     update_id = data.get("update_id")
-    message = data.get("message") or {}
-    chat = message.get("chat") or {}
-    user = message.get("from") or {}
+    msg = data.get("message") or {}
+    chat = msg.get("chat") or {}
+    frm = msg.get("from") or {}
 
     chat_id = chat.get("id")
-    username = user.get("username")
-    text = message.get("text", "")
+    username = frm.get("username")
+    text = msg.get("text", "")
 
-    processing_ms = int((time.time() - start_time) * 1000)
+    # ACK instantly
+    # (Fast response for Telegram webhook)
+    resp = PlainTextResponse("OK", status_code=200)
 
-    log_json({
+    # Ignore non-text or missing chat_id
+    if not chat_id:
+        return resp
+
+    # Save to per-user buffer
+    row = {
+        "ts": now_utc(),
         "type": "incoming",
         "update_id": update_id,
         "chat_id": chat_id,
         "username": username,
         "text": text,
-        "processing_ms": processing_ms
-    })
+    }
 
-    if chat_id:
-        reply = (
-            "🚀 RAILWAY LOG TEST\n"
-            f"You said: {text}\n"
-            f"Processing: {processing_ms} ms"
-        )
+    with LOCK:
+        BUFFER.setdefault(chat_id, []).append(row)
+        count = len(BUFFER[chat_id])
 
-        background.add_task(tg_send_message, chat_id, reply)
+    # Optional: small reply so user knows it's counting
+    # (You can remove this if you want silent logging)
+    background.add_task(
+        tg_send_message,
+        chat_id,
+        f"🧾 Audit saved ({count}/10). Send 10 messages to get .log file."
+    )
 
-    return PlainTextResponse("OK", status_code=200)
+    # If reached 10, build + send .log
+    background.add_task(build_and_send_log_if_ready, chat_id, username)
+
+    return resp
