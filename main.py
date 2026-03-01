@@ -5,103 +5,133 @@ import requests
 from datetime import datetime
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
+from logging.handlers import RotatingFileHandler
+import logging
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # optional
-LOG_TO_FILE = os.getenv("LOG_TO_FILE", "0") == "1"
-LOG_FILE = os.getenv("LOG_FILE", "tg_railway_audit.log")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+LOG_DIR = "logs"
+LOG_FILE = f"{LOG_DIR}/telegram_audit.log"
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI()
 
-def log_line(obj: dict):
-    obj["ts"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    line = json.dumps(obj, ensure_ascii=False)
+# =============================
+# Create log directory
+# =============================
+os.makedirs(LOG_DIR, exist_ok=True)
 
-    # Railway logs (best)
-    print(line, flush=True)
+# =============================
+# Configure logger
+# =============================
+logger = logging.getLogger("telegram_bot")
+logger.setLevel(logging.INFO)
 
-    # Optional file log (not persistent on Railway unless you mount volume)
-    if LOG_TO_FILE:
-        try:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
+handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3              # keep 3 old files
+)
 
+formatter = logging.Formatter('%(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# Also print to Railway logs
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+def log_json(data: dict):
+    data["ts"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    logger.info(json.dumps(data, ensure_ascii=False))
+
+
+# =============================
+# Telegram Sender
+# =============================
 def tg_send_message(chat_id: int, text: str):
-    if not BOT_TOKEN:
-        log_line({"type": "error", "msg": "BOT_TOKEN missing"})
-        return
-
     start = time.time()
+
     try:
         r = requests.post(
             f"{API}/sendMessage",
             data={"chat_id": chat_id, "text": text},
             timeout=10
         )
+
         ms = int((time.time() - start) * 1000)
         resp = r.json()
-        log_line({
-            "type": "telegram_send",
+
+        log_json({
+            "type": "outgoing",
+            "chat_id": chat_id,
             "telegram_api_ms": ms,
-            "telegram_ok": bool(resp.get("ok")),
+            "telegram_ok": resp.get("ok"),
             "telegram_resp": resp
         })
+
     except Exception as e:
         ms = int((time.time() - start) * 1000)
-        log_line({"type": "telegram_send_error", "telegram_api_ms": ms, "error": str(e)})
+        log_json({
+            "type": "telegram_error",
+            "telegram_api_ms": ms,
+            "error": str(e)
+        })
 
-@app.get("/")
-def root():
-    return {"ok": True, "service": "telegram-railway-audit-bot"}
 
+# =============================
+# Health Check
+# =============================
 @app.get("/health")
 def health():
     return {"ok": True}
 
+
+# =============================
+# Webhook
+# =============================
 @app.post("/webhook")
 async def webhook(request: Request, background: BackgroundTasks):
-    received_at = time.time()
 
-    # Optional security: Telegram secret header
+    start_time = time.time()
+
     if WEBHOOK_SECRET:
-        incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if incoming != WEBHOOK_SECRET:
-            log_line({"type": "blocked", "reason": "bad_secret"})
+        incoming_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if incoming_secret != WEBHOOK_SECRET:
+            log_json({"type": "blocked", "reason": "invalid_secret"})
             return PlainTextResponse("Forbidden", status_code=403)
 
     data = await request.json()
 
     update_id = data.get("update_id")
-    msg = data.get("message") or {}
-    chat = msg.get("chat") or {}
-    frm = msg.get("from") or {}
+    message = data.get("message") or {}
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
 
     chat_id = chat.get("id")
-    username = frm.get("username")
-    text = msg.get("text", "")
+    username = user.get("username")
+    text = message.get("text", "")
 
-    # Log incoming immediately
-    log_line({
+    processing_ms = int((time.time() - start_time) * 1000)
+
+    log_json({
         "type": "incoming",
         "update_id": update_id,
         "chat_id": chat_id,
         "username": username,
-        "text": text
+        "text": text,
+        "processing_ms": processing_ms
     })
 
-    # ACK instantly to Telegram (webhook speed)
-    # Then do work in background.
     if chat_id:
-        process_ms = int((time.time() - received_at) * 1000)
         reply = (
-            "🚀 RAILWAY VPS AUDIT\n"
+            "🚀 RAILWAY LOG TEST\n"
             f"You said: {text}\n"
-            f"App processing: {process_ms} ms"
+            f"Processing: {processing_ms} ms"
         )
+
         background.add_task(tg_send_message, chat_id, reply)
 
     return PlainTextResponse("OK", status_code=200)
