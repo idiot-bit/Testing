@@ -1,54 +1,61 @@
 <?php
 session_start();
 
-/**
- * Demo config for UI branding and login.
- * Replace demo credentials before production use.
- */
-$config = [
-    'site_name' => 'Aurora Access',
-    'logo_mode' => 'text', // text | image
-    'logo_text' => 'AA',
-    'logo_image' => 'assets/logo.svg',
-    'favicon_mode' => 'emoji', // emoji | file
-    'favicon_emoji' => '🔐',
-    'favicon_file' => 'assets/favicon.ico',
-    'users' => [
-        'demo' => 'demo123',
-        'admin' => 'admin123',
-    ],
-];
+function loadEnv(string $path): void
+{
+    if (!is_file($path)) {
+        return;
+    }
+
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        return;
+    }
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) {
+            continue;
+        }
+
+        [$key, $value] = explode('=', $line, 2);
+        $key = trim($key);
+        $value = trim($value);
+
+        if ($key === '') {
+            continue;
+        }
+
+        if ((str_starts_with($value, '"') && str_ends_with($value, '"')) || (str_starts_with($value, "'") && str_ends_with($value, "'"))) {
+            $value = substr($value, 1, -1);
+        }
+
+        $_ENV[$key] = $value;
+        putenv($key . '=' . $value);
+    }
+}
+
+function envVal(string $key, string $default = ''): string
+{
+    $value = $_ENV[$key] ?? getenv($key);
+    return $value === false || $value === null || $value === '' ? $default : (string) $value;
+}
 
 function h(?string $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function buildFaviconHref(array $config): string
-{
-    if (($config['favicon_mode'] ?? 'emoji') === 'file') {
-        return (string) ($config['favicon_file'] ?? 'favicon.ico');
-    }
+loadEnv(__DIR__ . '/.env');
 
-    $emoji = (string) ($config['favicon_emoji'] ?? '🔐');
-    return 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">'
-        . rawurlencode($emoji)
-        . '</text></svg>';
-}
+$siteName = envVal('SITE_NAME', 'Aurora Access');
+$faviconEmoji = envVal('FAVICON_EMOJI', '🔐');
+$logoText = envVal('LOGO_TEXT', 'AA');
 
-function renderLogo(array $config): string
-{
-    $mode = $config['logo_mode'] ?? 'text';
-
-    if ($mode === 'image') {
-        $src = h((string) ($config['logo_image'] ?? 'assets/logo.svg'));
-        $name = h((string) ($config['site_name'] ?? 'My Website'));
-        return '<img src="' . $src . '" alt="' . $name . ' logo" class="logo-image">';
-    }
-
-    $text = h((string) ($config['logo_text'] ?? 'LG'));
-    return '<div class="logo-text">' . $text . '</div>';
-}
+$users = [
+    envVal('LOGIN_USER_1', 'demo') => envVal('LOGIN_PASS_1', 'demo123'),
+    envVal('LOGIN_USER_2', 'admin') => envVal('LOGIN_PASS_2', 'admin123'),
+];
 
 if (isset($_GET['logout'])) {
     $_SESSION = [];
@@ -75,8 +82,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($username === '') {
             $errors[] = 'Username is required.';
             $screen = 'username';
-        } elseif (!array_key_exists($username, $config['users'])) {
-            $errors[] = 'This username was not found.';
+        } elseif (!array_key_exists($username, $users)) {
+            $errors[] = 'Username not found.';
             $screen = 'username';
         } else {
             $_SESSION['pending_username'] = $username;
@@ -89,13 +96,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pendingUsername = $_SESSION['pending_username'] ?? null;
 
         if ($pendingUsername === null) {
-            $errors[] = 'Session expired. Please start again.';
+            $errors[] = 'Session ended. Start again.';
             $screen = 'username';
         } elseif ($password === '') {
             $errors[] = 'Password is required.';
             $screen = 'password';
-        } elseif (!hash_equals((string) $config['users'][$pendingUsername], $password)) {
-            $errors[] = 'Invalid password.';
+        } elseif (!hash_equals((string) $users[$pendingUsername], $password)) {
+            $errors[] = 'Incorrect password.';
             $screen = 'password';
         } else {
             $_SESSION['authenticated'] = true;
@@ -111,60 +118,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$siteName = h((string) ($config['site_name'] ?? 'My Website'));
-$faviconHref = buildFaviconHref($config);
 $currentUsername = h($_SESSION['pending_username'] ?? '');
 $loggedInUser = h($_SESSION['username'] ?? '');
-$logoMarkup = renderLogo($config);
+$faviconHref = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">'
+    . rawurlencode($faviconEmoji)
+    . '</text></svg>';
 ?>
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?php echo $siteName; ?> · Secure Login</title>
-    <meta name="description" content="Two-step premium login interface in PHP.">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title><?php echo h($siteName); ?> · Login</title>
+    <meta name="description" content="Two-step mobile login UI in PHP.">
     <link rel="icon" type="image/svg+xml" href="<?php echo h($faviconHref); ?>">
     <style>
         :root {
-            --bg-1: #060816;
-            --bg-2: #10071f;
-            --card: rgba(18, 24, 44, 0.7);
-            --card-border: rgba(255, 255, 255, 0.12);
-            --text: #ecf1ff;
-            --muted: #a8b4d6;
-            --primary: #8b5cf6;
-            --primary-2: #6d28d9;
-            --focus: #22d3ee;
+            --bg: #070b16;
+            --bg-2: #120a25;
+            --card: rgba(17, 25, 45, 0.72);
+            --stroke: rgba(255, 255, 255, 0.12);
+            --text: #f2f5ff;
+            --muted: #a7b2d6;
+            --brand-a: #7c3aed;
+            --brand-b: #0ea5e9;
             --danger: #fb7185;
-            --success: #34d399;
+            --ok: #34d399;
         }
         * { box-sizing: border-box; }
+        html, body { margin: 0; }
         body {
-            margin: 0;
-            min-height: 100vh;
+            min-height: 100dvh;
             color: var(--text);
-            font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif;
             background:
-                radial-gradient(circle at 15% 20%, rgba(79, 70, 229, 0.45), transparent 42%),
-                radial-gradient(circle at 85% 0%, rgba(236, 72, 153, 0.25), transparent 35%),
-                linear-gradient(145deg, var(--bg-1), var(--bg-2));
+                radial-gradient(110% 70% at 85% -10%, rgba(14, 165, 233, .35), transparent 60%),
+                radial-gradient(90% 70% at -10% 0%, rgba(124, 58, 237, .36), transparent 60%),
+                linear-gradient(160deg, var(--bg), var(--bg-2));
             display: grid;
             place-items: center;
-            padding: 20px;
+            padding: 10px;
+            overflow-y: auto;
         }
-        .shell {
-            width: 100%;
-            max-width: 460px;
-            border: 1px solid var(--card-border);
-            background: linear-gradient(145deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
-            backdrop-filter: blur(14px);
-            border-radius: 24px;
-            box-shadow: 0 22px 60px rgba(0, 0, 0, 0.35);
+        .phone {
+            width: min(100%, 390px);
+            min-height: 72dvh;
+            border-radius: 26px;
+            border: 1px solid var(--stroke);
+            background: linear-gradient(150deg, rgba(255,255,255,.08), rgba(255,255,255,.03));
+            backdrop-filter: blur(12px);
+            box-shadow: 0 20px 50px rgba(0,0,0,.45);
+            display: flex;
+            flex-direction: column;
             overflow: hidden;
         }
-        .header {
-            padding: 22px 24px 8px;
+        .top {
+            padding: 18px 16px 8px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -175,166 +184,172 @@ $logoMarkup = renderLogo($config);
             align-items: center;
             gap: 10px;
         }
-        .logo-text, .logo-image {
-            width: 38px;
-            height: 38px;
-            border-radius: 12px;
+        .logo {
+            width: 36px;
+            height: 36px;
+            border-radius: 11px;
             display: grid;
             place-items: center;
-            background: linear-gradient(145deg, #a78bfa, #6366f1);
-            box-shadow: inset 0 0 14px rgba(255, 255, 255, 0.24);
-            color: #fff;
             font-weight: 700;
+            letter-spacing: .4px;
+            background: linear-gradient(145deg, var(--brand-a), var(--brand-b));
+            color: #fff;
+            box-shadow: inset 0 0 12px rgba(255,255,255,.18);
         }
-        .logo-image {
-            object-fit: cover;
-            padding: 4px;
-            background: rgba(255, 255, 255, 0.12);
-        }
-        .brand-title {
-            font-size: 1rem;
+        .site {
+            font-size: .95rem;
             font-weight: 650;
-            letter-spacing: .2px;
         }
         .step {
-            font-size: 0.75rem;
+            font-size: .73rem;
             color: var(--muted);
             border: 1px solid rgba(255,255,255,.15);
             border-radius: 999px;
-            padding: 5px 10px;
+            padding: 5px 9px;
+            white-space: nowrap;
         }
         .content {
-            padding: 14px 24px 24px;
+            padding: 10px 16px 16px;
+            display: grid;
+            gap: 10px;
+            margin-top: auto;
+            margin-bottom: auto;
         }
-        h1 { margin: 0 0 6px; font-size: 1.45rem; }
-        .subtitle { margin: 0 0 18px; color: var(--muted); }
+        h1 {
+            margin: 0;
+            font-size: 1.35rem;
+            letter-spacing: .2px;
+        }
+        .sub {
+            margin: 0;
+            color: var(--muted);
+            font-size: .92rem;
+            line-height: 1.45;
+        }
         .error {
-            margin-bottom: 14px;
+            font-size: .89rem;
             border-radius: 12px;
-            background: rgba(251, 113, 133, .16);
+            padding: 10px 11px;
+            background: rgba(251, 113, 133, .14);
             border: 1px solid rgba(251, 113, 133, .45);
-            color: #ffe1e7;
-            padding: 10px 12px;
-            font-size: .93rem;
+            color: #ffe3e9;
         }
         label {
+            font-size: .88rem;
+            color: #dbe3ff;
+            margin-bottom: 7px;
             display: block;
-            margin-bottom: 8px;
-            color: #dbe4ff;
-            font-size: .92rem;
         }
-        .input {
+        .field {
             width: 100%;
             border: 1px solid rgba(255,255,255,.18);
             border-radius: 14px;
-            padding: 12px 13px;
+            background: rgba(1, 8, 24, .45);
             color: var(--text);
-            background: rgba(1, 6, 20, .5);
-            margin-bottom: 14px;
+            padding: 12px;
             outline: none;
-            transition: .2s ease;
+            font-size: .96rem;
+            margin-bottom: 12px;
         }
-        .input:focus {
-            border-color: var(--focus);
-            box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.2);
+        .field:focus {
+            border-color: #67e8f9;
+            box-shadow: 0 0 0 3px rgba(103, 232, 249, .2);
         }
-        .button {
+        .btn {
             width: 100%;
             border: 0;
             border-radius: 14px;
-            padding: 12px 14px;
+            padding: 12px;
+            font-size: .95rem;
             font-weight: 700;
             cursor: pointer;
-            transition: transform .14s ease, box-shadow .14s ease;
         }
-        .button:hover { transform: translateY(-1px); }
-        .button-primary {
+        .btn-main {
             color: #fff;
-            background: linear-gradient(135deg, var(--primary), var(--primary-2));
-            box-shadow: 0 8px 20px rgba(109, 40, 217, 0.45);
+            background: linear-gradient(135deg, var(--brand-a), var(--brand-b));
+            box-shadow: 0 10px 20px rgba(14, 165, 233, .28);
         }
-        .button-secondary {
-            margin-top: 10px;
-            background: rgba(255,255,255,0.08);
+        .btn-soft {
+            margin-top: 9px;
+            border: 1px solid rgba(255,255,255,.16);
             color: #e5e7eb;
-            border: 1px solid rgba(255,255,255,0.14);
+            background: rgba(255,255,255,.07);
         }
-        .success {
-            border-radius: 14px;
+        .ok {
             border: 1px solid rgba(52, 211, 153, .45);
-            background: rgba(16, 185, 129, .16);
-            padding: 12px;
-            margin-bottom: 14px;
-            color: #d1fae5;
+            background: rgba(16, 185, 129, .15);
+            color: #dbfff2;
+            border-radius: 12px;
+            padding: 10px 11px;
+            font-size: .9rem;
         }
-        .tiny {
-            margin-top: 14px;
+        .foot {
+            margin-top: 8px;
             color: var(--muted);
-            font-size: .83rem;
+            font-size: .8rem;
         }
-        code {
-            background: rgba(255,255,255,.08);
-            padding: 2px 6px;
-            border-radius: 8px;
-            border: 1px solid rgba(255,255,255,.12);
+        .link { color: #bfdbfe; text-decoration: none; font-weight: 600; }
+
+        @media (min-width: 600px) {
+            body { padding: 18px; }
+            .phone { min-height: 68dvh; }
         }
-        .logout { color: #c4b5fd; text-decoration: none; font-weight: 600; }
     </style>
 </head>
 <body>
-<div class="shell">
-    <div class="header">
-        <div class="brand">
-            <?php echo $logoMarkup; ?>
-            <div class="brand-title"><?php echo $siteName; ?></div>
-        </div>
-        <div class="step">
-            <?php echo $screen === 'password' ? 'Step 2 of 2' : ($screen === 'username' ? 'Step 1 of 2' : 'Complete'); ?>
-        </div>
-    </div>
+    <main class="phone">
+        <header class="top">
+            <div class="brand">
+                <div class="logo"><?php echo h($logoText); ?></div>
+                <div class="site"><?php echo h($siteName); ?></div>
+            </div>
+            <div class="step">
+                <?php echo $screen === 'password' ? '2 / 2' : ($screen === 'username' ? '1 / 2' : 'Done'); ?>
+            </div>
+        </header>
 
-    <div class="content">
-        <?php if ($screen === 'username'): ?>
-            <h1>Welcome back</h1>
-            <p class="subtitle">Enter your username to continue.</p>
-            <?php foreach ($errors as $error): ?>
-                <div class="error"><?php echo h($error); ?></div>
-            <?php endforeach; ?>
+        <section class="content">
+            <?php if ($screen === 'username'): ?>
+                <h1>Sign in</h1>
+                <p class="sub">Enter your username to continue.</p>
+                <?php foreach ($errors as $error): ?>
+                    <div class="error"><?php echo h($error); ?></div>
+                <?php endforeach; ?>
 
-            <form method="post" autocomplete="off">
-                <input type="hidden" name="action" value="username">
-                <label for="username">Username</label>
-                <input class="input" id="username" type="text" name="username" placeholder="Enter username" required>
-                <button class="button button-primary" type="submit">Continue</button>
-            </form>
+                <form method="post" autocomplete="off">
+                    <input type="hidden" name="action" value="username">
+                    <label for="username">Username</label>
+                    <input class="field" id="username" type="text" name="username" placeholder="your username" required>
+                    <button class="btn btn-main" type="submit">Continue</button>
+                </form>
 
-        <?php elseif ($screen === 'password'): ?>
-            <h1>Confirm your password</h1>
-            <p class="subtitle">Signing in as <strong><?php echo $currentUsername; ?></strong>.</p>
-            <?php foreach ($errors as $error): ?>
-                <div class="error"><?php echo h($error); ?></div>
-            <?php endforeach; ?>
+            <?php elseif ($screen === 'password'): ?>
+                <h1>Enter password</h1>
+                <p class="sub">Username: <strong><?php echo $currentUsername; ?></strong></p>
+                <?php foreach ($errors as $error): ?>
+                    <div class="error"><?php echo h($error); ?></div>
+                <?php endforeach; ?>
 
-            <form method="post" autocomplete="off">
-                <input type="hidden" name="action" value="password">
-                <label for="password">Password</label>
-                <input class="input" id="password" type="password" name="password" placeholder="Enter password" required>
-                <button class="button button-primary" type="submit">Login securely</button>
-            </form>
+                <form method="post" autocomplete="off">
+                    <input type="hidden" name="action" value="password">
+                    <label for="password">Password</label>
+                    <input class="field" id="password" type="password" name="password" placeholder="your password" required>
+                    <button class="btn btn-main" type="submit">Login</button>
+                </form>
 
-            <form method="post">
-                <input type="hidden" name="action" value="back">
-                <button class="button button-secondary" type="submit">Use a different username</button>
-            </form>
+                <form method="post">
+                    <input type="hidden" name="action" value="back">
+                    <button class="btn btn-soft" type="submit">Back</button>
+                </form>
 
-        <?php else: ?>
-            <h1>Access granted</h1>
-            <div class="success">You are logged in as <strong><?php echo $loggedInUser; ?></strong>.</div>
-            <p class="subtitle">Session login is active and ready for protected pages.</p>
-            <p><a class="logout" href="?logout=1">Logout</a></p>
-            <p class="tiny">Demo users: <code>demo / demo123</code> and <code>admin / admin123</code></p>
-        <?php endif; ?>
-    </div>
-</div>
+            <?php else: ?>
+                <h1>Welcome</h1>
+                <div class="ok">Logged in as <strong><?php echo $loggedInUser; ?></strong>.</div>
+                <p class="sub">Your session is active.</p>
+                <p><a class="link" href="?logout=1">Logout</a></p>
+                <p class="foot">Users come from <code>.env</code>.</p>
+            <?php endif; ?>
+        </section>
+    </main>
 </body>
 </html>
